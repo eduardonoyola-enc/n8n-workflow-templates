@@ -1,0 +1,191 @@
+{
+  "name": "WhatsApp AI Lead Qualifier (Template)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-inbound",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook (WhatsApp Inbound)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "webhookId": "REPLACE_WITH_YOUR_WEBHOOK_ID"
+    },
+    {
+      "parameters": {
+        "documentURL": "https://docs.google.com/document/d/REPLACE_WITH_YOUR_DOC_ID/export?format=txt",
+        "options": {}
+      },
+      "id": "load-system-prompt",
+      "name": "Load System Prompt (Google Doc)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "agent": "conversationalAgent",
+        "promptType": "define",
+        "text": "={{ $('Webhook (WhatsApp Inbound)').first().json.body.message }}",
+        "options": {
+          "systemMessage": "={{ $('Load System Prompt (Google Doc)').first().json.data }}"
+        }
+      },
+      "id": "ai-agent",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o",
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "id": "llm-model",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [680, 480]
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Webhook (WhatsApp Inbound)').first().json.body.contact_id }}",
+        "contextWindowLength": 10
+      },
+      "id": "memory",
+      "name": "Simple Memory (Anchored to contact_id)",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.2,
+      "position": [820, 480],
+      "notes": "CRITICAL: sessionKey MUST be unique per conversation. Using the contact_id from the webhook prevents memory contamination across parallel conversations."
+    },
+    {
+      "parameters": {
+        "jsCode": "// See code-node-sanitizer.js in this folder for the full implementation\n// This is a simplified inline version for the workflow file\n\nconst aiResponse = $input.first().json.output || '';\nconst webhookData = $('Webhook (WhatsApp Inbound)').first().json.body;\n\n// Strip Unicode variation selectors that break CRM dispatch\nconst sanitize = (text) => text\n  .replace(/\\uFE0F/g, '')\n  .replace(/[\\u200B-\\u200D]/g, '')\n  .replace(/https?:\\/\\/(www\\.)?/gi, 'www.');\n\n// Extract structured JSON from AI response\nconst jsonMatch = aiResponse.match(/```json\\s*([\\s\\S]*?)\\s*```/);\nlet extracted = {};\ntry {\n  if (jsonMatch) extracted = JSON.parse(jsonMatch[1]);\n} catch (e) {\n  console.warn('AI structured output parse failed:', e.message);\n}\n\nreturn [{\n  json: {\n    sanitized_response: sanitize(aiResponse),\n    extracted_data: extracted,\n    stage: extracted.detected_stage || 'NEW_LEAD',\n    contact_id: webhookData.contact_id,\n    escalate: extracted.escalate_to_human === true,\n  }\n}];"
+      },
+      "id": "sanitizer",
+      "name": "Sanitize & Extract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1020, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.escalate }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "escalation-router",
+      "name": "Escalation Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1240, 300]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "https://YOUR_CRM_DOMAIN/api/v4/leads/{{ $('Webhook (WhatsApp Inbound)').first().json.body.lead_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "REPLACE_WITH_YOUR_CRM_CREDS",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"status_id\": {{ $json.crm_status_id }},\n  \"custom_fields_values\": {{ JSON.stringify($json.custom_fields) }}\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "crm-update",
+      "name": "Update CRM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1460, 200]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": "REPLACE_WITH_YOUR_SHEET_ID",
+        "sheetName": "Conversations",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Timestamp": "={{ $now.toISO() }}",
+            "ContactID": "={{ $('Webhook (WhatsApp Inbound)').first().json.body.contact_id }}",
+            "Stage": "={{ $json.stage }}",
+            "Message": "={{ $json.sanitized_response }}",
+            "Escalated": "={{ $json.escalate }}"
+          }
+        }
+      },
+      "id": "sheets-log",
+      "name": "Audit Log (Google Sheets)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [1460, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v18.0/YOUR_PHONE_NUMBER_ID/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "REPLACE_WITH_WHATSAPP_CREDS",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Webhook (WhatsApp Inbound)').first().json.body.from }}\",\n  \"type\": \"text\",\n  \"text\": { \"body\": {{ JSON.stringify($json.sanitized_response) }} }\n}"
+      },
+      "id": "whatsapp-reply",
+      "name": "Send WhatsApp Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1680, 300]
+    }
+  ],
+  "connections": {
+    "Webhook (WhatsApp Inbound)": {
+      "main": [[{ "node": "Load System Prompt (Google Doc)", "type": "main", "index": 0 }]]
+    },
+    "Load System Prompt (Google Doc)": {
+      "main": [[{ "node": "AI Agent", "type": "main", "index": 0 }]]
+    },
+    "AI Agent": {
+      "main": [[{ "node": "Sanitize & Extract", "type": "main", "index": 0 }]]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [[{ "node": "AI Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Simple Memory (Anchored to contact_id)": {
+      "ai_memory": [[{ "node": "AI Agent", "type": "ai_memory", "index": 0 }]]
+    },
+    "Sanitize & Extract": {
+      "main": [[{ "node": "Escalation Router", "type": "main", "index": 0 }]]
+    },
+    "Escalation Router": {
+      "main": [
+        [{ "node": "Update CRM", "type": "main", "index": 0 }],
+        [{ "node": "Update CRM", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update CRM": {
+      "main": [[{ "node": "Audit Log (Google Sheets)", "type": "main", "index": 0 }, { "node": "Send WhatsApp Reply", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCreatedBy": "Eduardo Noyola - ENC System Apps",
+    "notes": "This is a sanitized template. Real production version includes additional error handling, retry logic, and observability nodes. See README.md for full architecture."
+  }
+}
